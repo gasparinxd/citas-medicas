@@ -1,0 +1,59 @@
+name: docker-compose
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compilar backend con mvnw package (incluye tests)
+        run: cd backend && ./mvnw -B -q package
+
+      - name: Construir y levantar servicios
+        run: docker compose up -d --build
+
+      - name: Esperar al backend (BD y correo UP)
+        run: |
+          for i in $(seq 1 60); do
+            h=$(curl -fs http://localhost:8080/actuator/health) && echo "$h" | grep -q '"db":{"status":"UP"' && echo "$h" | grep -q '"mail":{"status":"UP"' && echo "$h" && exit 0
+            sleep 3
+          done
+          exit 1
+
+      - name: Probar API de los módulos
+        run: |
+          curl -fs -X POST http://localhost:8080/api/pacientes -H "Content-Type: application/json" -d '{"nombre":"Ana Pérez","email":"ana@example.com"}'
+          curl -fs -X POST http://localhost:8080/api/medicos -H "Content-Type: application/json" -d '{"nombre":"Dr. López","especialidad":"Cardiología"}'
+          curl -fs -X POST http://localhost:8080/api/citas -H "Content-Type: application/json" \
+            -d '{"pacienteId":1,"medicoId":1,"fechaHora":"2026-11-01T10:00:00","emailContacto":"ana@example.com"}'
+          curl -fs http://localhost:8080/api/citas | grep '"pacienteId":1'
+
+      - name: Probar que Mailpit recibió el correo
+        run: |
+          for i in $(seq 1 20); do
+            curl -fs http://localhost:8025/api/v1/messages | grep -q "Cita agendada" && exit 0
+            sleep 2
+          done
+          curl -s http://localhost:8025/api/v1/messages
+          exit 1
+
+      - name: Probar frontend y proxy /api
+        run: |
+          curl -fs http://localhost:3000 | grep "<title>Citas Médicas</title>"
+          curl -fs http://localhost:3000/api/citas | grep '"pacienteId":1'
+
+      - name: Estado y logs
+        if: always()
+        run: |
+          docker compose ps
+          docker compose logs --no-color
+
+      - name: Detener servicios
+        if: always()
+        run: docker compose down -v
